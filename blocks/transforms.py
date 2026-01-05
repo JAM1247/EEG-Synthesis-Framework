@@ -29,15 +29,11 @@ class PACModulate:
         if low_signal is None or high_signal is None:
             raise ValueError(f"PAC requires '{self.low_band_name}' and '{self.high_band_name}' in components")
         
-        # Extract phase from low frequency
-        if backend.name == "numpy":
-            from scipy.signal import hilbert
-            analytic_low = hilbert(low_signal, axis=1)
-            phase = np.angle(analytic_low)
-        else:
-            # JAX implementation
-            analytic_low = backend.xp.fft.fft(low_signal, axis=1)
-            phase = backend.xp.angle(analytic_low)
+        # Extract instantaneous phase from low frequency (analytic signal)
+        low_arr = backend.xp.asarray(low_signal)
+        analytic_low = backend.hilbert(low_arr, axis=1)
+        phase = backend.xp.angle(analytic_low)
+
         
         # Create modulation
         if self.coupling_fn == "cos":
