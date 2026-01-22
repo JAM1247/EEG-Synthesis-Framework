@@ -50,7 +50,7 @@ class BandPower:
         for ch in range(x.shape[0]):
             f, pxx = welch(x[ch], fs=sfreq, nperseg=nperseg)
             mask = (f >= self.band_hz[0]) & (f <= self.band_hz[1])
-            bp = np.trapz(pxx[mask], f[mask])
+            bp = np.trapezoid(pxx[mask], f[mask])
             powers.append(bp)
 
         powers = np.asarray(powers)  # V^2
@@ -137,7 +137,7 @@ class MultiBandPower:
             powers = []
             
             for ch in range(n_channels):
-                bp = np.trapz(psds[ch, mask], freqs[mask])
+                bp = np.trapezoid(psds[ch, mask], freqs[mask])
                 powers.append(bp)
             
             powers = np.asarray(powers) * 1e12  # Convert to µV^2
