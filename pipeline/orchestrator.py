@@ -22,7 +22,13 @@ class BlockStep:
 
 
 class Pipeline:
-    """Composable EEG signal processing pipeline"""
+    """Composable EEG signal processing pipeline
+    
+    Notes:
+    - Non-signal outputs overwrite by key; use unique tags to avoid collisions
+    - Signal shape is validated after each block
+    - Core parameters (duration, sfreq, n_channels) cannot be overridden
+    """
 
     def __init__(self, backend: str = "numpy", seed: int = 42):
         self.backend_name = backend
@@ -58,6 +64,7 @@ class Pipeline:
         duration: float,
         sfreq: float,
         n_channels: int,
+        initial_signal=None,
         **initial_context,
     ) -> Dict[str, Any]:
         """Execute the pipeline"""
@@ -72,17 +79,44 @@ class Pipeline:
             "backend": self.backend_name,
             "seed": self.seed,
         })
-        # Add user-provided context/metadata
+        
+        # Add user-provided context/metadata, but filter out core fields
+        core_fields = {"duration", "sfreq", "n_channels", "n_samples", "times", "nyquist", "backend", "signal", "components"}
         for k, v in initial_context.items():
-            self.context.metadata[k] = v
+            if k not in core_fields:
+                self.context.metadata[k] = v
+            else:
+                import warnings
+                warnings.warn(f"Ignoring initial_context['{k}'] as it conflicts with core pipeline parameter")
 
-        # Initialize signal accumulator
-        current_signal = self.backend.zeros((n_channels, self.context.n_samples))
+        # Initialize signal accumulator with validation
+        if initial_signal is None:
+            current_signal = self.backend.zeros((n_channels, self.context.n_samples))
+        else:
+            x = self.backend.asarray(initial_signal)
+            if x.shape != (n_channels, self.context.n_samples):
+                raise ValueError(
+                    f"initial_signal must have shape {(n_channels, self.context.n_samples)}, got {x.shape}"
+                )
+            current_signal = x
 
         # Execute pipeline
         for step in self.steps:
-            # Prepare block context
+            # Validate accumulate mode early
+            if step.accumulate not in ["replace", "add", "multiply"]:
+                raise ValueError(
+                    f"Invalid accumulate mode '{step.accumulate}' for step '{step.name}'. "
+                    f"Must be 'replace', 'add', or 'multiply'."
+                )
+            
+            # Generate unique seed for this step (FIX for RNG)
+            step_seed = int(self.rng_manager.integers(0, 2**31 - 1))
+            
+            # Prepare block context (core params last so they're authoritative)
             block_context = {
+                **self.context.metadata,  # user metadata first
+                **step.params,             # step params override user metadata
+                # Core parameters last - these are authoritative
                 "signal": current_signal,
                 "duration": duration,
                 "sfreq": sfreq,
@@ -92,19 +126,29 @@ class Pipeline:
                 "nyquist": self.context.nyquist,
                 "backend": self.backend_name,
                 "components": self.context.components,
-                **step.params,
-                **self.context.metadata,
             }
 
-            # Execute block — blocks seed their own RNG from `key`, and `None` is fine
-            key = None
-            output: BlockOutput = step.block(key=key, context=block_context)
+            # Execute block with unique seed
+            output: BlockOutput = step.block(key=step_seed, context=block_context)
 
             # Process output
             if "signal" in output.data:
                 new_signal = output.data["signal"]
+                
+                # Validate shape (critical for production robustness)
+                expected_shape = current_signal.shape
+                if hasattr(new_signal, 'shape'):
+                    actual_shape = new_signal.shape
+                else:
+                    actual_shape = np.asarray(new_signal).shape
+                
+                if actual_shape != expected_shape:
+                    raise ValueError(
+                        f"Step '{step.name}' produced signal with shape {actual_shape}, "
+                        f"expected {expected_shape}"
+                    )
 
-                # Accumulate
+                # Accumulate (validation already done above)
                 if step.accumulate == "replace":
                     current_signal = new_signal
                 elif step.accumulate == "add":
@@ -112,9 +156,16 @@ class Pipeline:
                 elif step.accumulate == "multiply":
                     current_signal = current_signal * new_signal
 
-            # Save component
+            # Save component if requested
+            # Note: save_component only saves the "signal" field from output.data
+            # For other outputs, they are automatically saved to components
             if step.save_component and "signal" in output.data:
                 self.context.components[step.component_name] = output.data["signal"]
+
+            # Save any additional data from the block (overwrite if key exists)
+            for data_key, data_val in output.data.items():
+                if data_key != "signal":
+                    self.context.components[data_key] = data_val
 
             # Collect events
             if output.events:
